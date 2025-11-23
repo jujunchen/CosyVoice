@@ -20,6 +20,8 @@ import torch
 import torchaudio
 import random
 import librosa
+import time
+
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
 from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
@@ -64,6 +66,10 @@ def change_instruction(mode_checkbox_group):
 
 def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
                    seed, stream, speed):
+    # 添加时间记录变量
+    start_time = time.time()
+    first_token_time = None
+
     if prompt_wav_upload is not None:
         prompt_wav = prompt_wav_upload
     elif prompt_wav_record is not None:
@@ -124,6 +130,10 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
         prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
         set_all_random_seed(seed)
         for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed):
+            if first_token_time is None:
+                first_token_time = time.time()
+                latency = first_token_time - start_time
+                logging.info(f"First token latency: {latency} seconds")
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
     elif mode_checkbox_group == '跨语种复刻':
         logging.info('get cross_lingual inference request')
