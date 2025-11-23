@@ -139,12 +139,12 @@ class CosyVoiceFrontEnd:
                 text = remove_bracket(text)
                 text = re.sub(r'[，,、]+$', '。', text)
                 texts = list(split_paragraph(text, partial(self.tokenizer.encode, allowed_special=self.allowed_special), "zh", token_max_n=80,
-                                             token_min_n=60, merge_len=20, comma_split=False))
+                                             token_min_n=60, merge_len=20, comma_split=True))
             else:
                 text = self.en_tn_model.normalize(text)
                 text = spell_out_number(text, self.inflect_parser)
                 texts = list(split_paragraph(text, partial(self.tokenizer.encode, allowed_special=self.allowed_special), "en", token_max_n=80,
-                                             token_min_n=60, merge_len=20, comma_split=False))
+                                             token_min_n=60, merge_len=20, comma_split=True))
         texts = [i for i in texts if not is_only_punctuation(i)]
         return texts if split is True else text
 
@@ -155,25 +155,57 @@ class CosyVoiceFrontEnd:
         return model_input
 
     def frontend_zero_shot(self, tts_text, prompt_text, prompt_speech_16k, resample_rate, zero_shot_spk_id):
+        """
+        零样本语音合成的前端处理函数
+        
+        Args:
+            tts_text (str): 要合成的目标文本
+            prompt_text (str): 提示文本，用于零样本合成中的语义引导
+            prompt_speech_16k (Tensor): 提示语音，采样率为16kHz的音频数据
+            resample_rate (int): 目标重采样率
+            zero_shot_spk_id (str): 零样本说话人ID，如果提供则使用预存的说话人信息
+            
+        Returns:
+            dict: 包含所有模型输入信息的字典
+        """
+        # 提取目标文本的token及其长度
         tts_text_token, tts_text_token_len = self._extract_text_token(tts_text)
+        
+        # 如果没有指定预定义的说话人ID，则从提示语音中提取相关信息
         if zero_shot_spk_id == '':
+            # 提取提示文本的token及其长度
             prompt_text_token, prompt_text_token_len = self._extract_text_token(prompt_text)
+            
+            # 对提示语音进行重采样，从16kHz转换到目标采样率
             prompt_speech_resample = torchaudio.transforms.Resample(orig_freq=16000, new_freq=resample_rate)(prompt_speech_16k)
+            
+            # 提取重采样后语音的声学特征和特征长度
             speech_feat, speech_feat_len = self._extract_speech_feat(prompt_speech_resample)
+            
+            # 提取提示语音的语音token和token长度（基于16kHz原始音频）
             speech_token, speech_token_len = self._extract_speech_token(prompt_speech_16k)
+            
+            # 针对CosyVoice2模型的特殊处理，强制speech_feat与speech_token长度比例为2:1
             if resample_rate == 24000:
                 # cosyvoice2, force speech_feat % speech_token = 2
                 token_len = min(int(speech_feat.shape[1] / 2), speech_token.shape[1])
                 speech_feat, speech_feat_len[:] = speech_feat[:, :2 * token_len], 2 * token_len
                 speech_token, speech_token_len[:] = speech_token[:, :token_len], token_len
+                
+            # 提取说话人嵌入向量（基于16kHz原始音频）
             embedding = self._extract_spk_embedding(prompt_speech_16k)
+            
+            # 构建模型输入字典，包含文本、语音特征和嵌入信息
             model_input = {'prompt_text': prompt_text_token, 'prompt_text_len': prompt_text_token_len,
                            'llm_prompt_speech_token': speech_token, 'llm_prompt_speech_token_len': speech_token_len,
                            'flow_prompt_speech_token': speech_token, 'flow_prompt_speech_token_len': speech_token_len,
                            'prompt_speech_feat': speech_feat, 'prompt_speech_feat_len': speech_feat_len,
                            'llm_embedding': embedding, 'flow_embedding': embedding}
         else:
+            # 如果指定了预定义的说话人ID，则直接使用预存的说话人信息
             model_input = self.spk2info[zero_shot_spk_id]
+            
+        # 将目标文本及其长度添加到模型输入中
         model_input['text'] = tts_text_token
         model_input['text_len'] = tts_text_token_len
         return model_input

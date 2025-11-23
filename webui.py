@@ -170,7 +170,7 @@ def main():
                                       seed, stream, speed],
                               outputs=[audio_output])
         mode_checkbox_group.change(fn=change_instruction, inputs=[mode_checkbox_group], outputs=[instruction_text])
-    demo.queue(max_size=4, default_concurrency_limit=2)
+    demo.queue(max_size=4, default_concurrency_limit=3)
     demo.launch(server_name='0.0.0.0', server_port=args.port)
 
 
@@ -188,7 +188,7 @@ if __name__ == '__main__':
         cosyvoice = CosyVoice(args.model_dir)
     except Exception:
         try:
-            cosyvoice = CosyVoice2(args.model_dir)
+            cosyvoice = CosyVoice2(args.model_dir, load_jit=True, load_trt=True, load_vllm=True, fp16=True)
         except Exception:
             raise TypeError('no valid model_type!')
 
