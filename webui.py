@@ -124,6 +124,10 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
         logging.info('get sft inference request')
         set_all_random_seed(seed)
         for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
+            if first_token_time is None:
+                first_token_time = time.time()
+                latency = first_token_time - start_time
+                logging.info(f"---->First token latency: {latency} seconds")
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
     elif mode_checkbox_group == '3s极速复刻':
         logging.info('get zero_shot inference request')
@@ -133,7 +137,7 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
             if first_token_time is None:
                 first_token_time = time.time()
                 latency = first_token_time - start_time
-                logging.info(f"First token latency: {latency} seconds")
+                logging.info(f"---->First token latency: {latency} seconds")
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
     elif mode_checkbox_group == '跨语种复刻':
         logging.info('get cross_lingual inference request')
