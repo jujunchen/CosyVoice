@@ -205,7 +205,7 @@ if __name__ == '__main__':
     #     cosyvoice = CosyVoice(args.model_dir)
     # except Exception:
     try:
-        cosyvoice = CosyVoice2(args.model_dir, load_jit=True, load_trt=True, load_vllm=True, fp16=True)
+        cosyvoice = CosyVoice2(args.model_dir, load_jit=False, load_trt=True, load_vllm=True, fp16=True, trt_concurrent=2)
     except Exception:
         raise TypeError('no valid model_type!')
 

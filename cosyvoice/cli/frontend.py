@@ -37,6 +37,12 @@ from cosyvoice.utils.frontend_utils import contains_chinese, replace_blank, repl
 
 
 class CosyVoiceFrontEnd:
+    """
+    CosyVoice前端处理类
+    
+    负责文本预处理、语音特征提取、说话人嵌入提取等功能。
+    是连接用户输入和模型推理之间的桥梁。
+    """
 
     def __init__(self,
                  get_tokenizer: Callable,
@@ -45,6 +51,17 @@ class CosyVoiceFrontEnd:
                  speech_tokenizer_model: str,
                  spk2info: str = '',
                  allowed_special: str = 'all'):
+        """
+        初始化前端处理器
+        
+        Args:
+            get_tokenizer (Callable): 获取文本分词器的函数
+            feat_extractor (Callable): 特征提取器函数
+            campplus_model (str): 说话人识别模型路径（用于提取说话人嵌入）
+            speech_tokenizer_model (str): 语音分词器模型路径
+            spk2info (str): 说话人信息文件路径
+            allowed_special (str): 允许的特殊标记，默认'all'
+        """
         self.tokenizer = get_tokenizer()
         self.feat_extractor = feat_extractor
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -73,6 +90,15 @@ class CosyVoiceFrontEnd:
             self.inflect_parser = inflect.engine()
 
     def _extract_text_token(self, text):
+        """
+        提取文本的token表示
+        
+        Args:
+            text (str or Generator): 输入文本或文本生成器
+            
+        Returns:
+            tuple: (文本token张量, 文本token长度)
+        """
         if isinstance(text, Generator):
             logging.info('get tts_text generator, will return _extract_text_token_generator!')
             # NOTE add a dummy text_token_len for compatibility
@@ -84,12 +110,30 @@ class CosyVoiceFrontEnd:
             return text_token, text_token_len
 
     def _extract_text_token_generator(self, text_generator):
+        """
+        处理文本生成器，逐个提取token
+        
+        Args:
+            text_generator: 文本生成器对象
+            
+        Yields:
+            单个文本token
+        """
         for text in text_generator:
             text_token, _ = self._extract_text_token(text)
             for i in range(text_token.shape[1]):
                 yield text_token[:, i: i + 1]
 
     def _extract_speech_token(self, speech):
+        """
+        提取语音的token表示
+        
+        Args:
+            speech (Tensor): 输入语音波形
+            
+        Returns:
+            tuple: (语音token张量, 语音token长度)
+        """
         assert speech.shape[1] / 16000 <= 30, 'do not support extract speech token for audio longer than 30s'
         feat = whisper.log_mel_spectrogram(speech, n_mels=128)
         speech_token = self.speech_tokenizer_session.run(None,
@@ -102,6 +146,15 @@ class CosyVoiceFrontEnd:
         return speech_token, speech_token_len
 
     def _extract_spk_embedding(self, speech):
+        """
+        提取说话人嵌入向量
+        
+        Args:
+            speech (Tensor): 输入语音波形
+            
+        Returns:
+            Tensor: 说话人嵌入向量
+        """
         feat = kaldi.fbank(speech,
                            num_mel_bins=80,
                            dither=0,
@@ -113,12 +166,32 @@ class CosyVoiceFrontEnd:
         return embedding
 
     def _extract_speech_feat(self, speech):
+        """
+        提取语音特征
+        
+        Args:
+            speech (Tensor): 输入语音波形
+            
+        Returns:
+            tuple: (语音特征张量, 语音特征长度)
+        """
         speech_feat = self.feat_extractor(speech).squeeze(dim=0).transpose(0, 1).to(self.device)
         speech_feat = speech_feat.unsqueeze(dim=0)
         speech_feat_len = torch.tensor([speech_feat.shape[1]], dtype=torch.int32).to(self.device)
         return speech_feat, speech_feat_len
 
     def text_normalize(self, text, split=True, text_frontend=True):
+        """
+        文本标准化处理
+        
+        Args:
+            text (str): 输入文本
+            split (bool): 是否分割文本为句子，默认True
+            text_frontend (bool): 是否使用文本前端处理，默认True
+            
+        Returns:
+            list or str: 处理后的文本列表或字符串
+        """
         if isinstance(text, Generator):
             logging.info('get tts_text generator, will skip text_normalize!')
             return [text]
@@ -149,9 +222,23 @@ class CosyVoiceFrontEnd:
         return texts if split is True else text
 
     def frontend_sft(self, tts_text, spk_id):
+        """
+        SFT模式前端处理
+        
+        Args:
+            tts_text (str): 待合成文本
+            spk_id (str): 说话人ID
+            
+        Returns:
+            dict: 模型输入字典
+        """
         tts_text_token, tts_text_token_len = self._extract_text_token(tts_text)
-        embedding = self.spk2info[spk_id]['embedding']
-        model_input = {'text': tts_text_token, 'text_len': tts_text_token_len, 'llm_embedding': embedding, 'flow_embedding': embedding}
+        # 原来的配置会失真
+        # embedding = self.spk2info[spk_id]['llm_embedding']
+        # model_input = {'text': tts_text_token, 'text_len': tts_text_token_len, 'llm_embedding': embedding, 'flow_embedding': embedding}
+        model_input = self.spk2info[spk_id]
+        model_input['text'] = tts_text_token
+        model_input['text_len'] = tts_text_token_len
         return model_input
 
     def frontend_zero_shot(self, tts_text, prompt_text, prompt_speech_16k, resample_rate, zero_shot_spk_id):
@@ -211,6 +298,18 @@ class CosyVoiceFrontEnd:
         return model_input
 
     def frontend_cross_lingual(self, tts_text, prompt_speech_16k, resample_rate, zero_shot_spk_id):
+        """
+        跨语言模式前端处理
+        
+        Args:
+            tts_text (str): 待合成文本
+            prompt_speech_16k (Tensor): 提示语音
+            resample_rate (int): 重采样率
+            zero_shot_spk_id (str): 零样本说话人ID
+            
+        Returns:
+            dict: 模型输入字典
+        """
         model_input = self.frontend_zero_shot(tts_text, '', prompt_speech_16k, resample_rate, zero_shot_spk_id)
         # in cross lingual mode, we remove prompt in llm
         del model_input['prompt_text']
@@ -220,6 +319,17 @@ class CosyVoiceFrontEnd:
         return model_input
 
     def frontend_instruct(self, tts_text, spk_id, instruct_text):
+        """
+        Instruct模式前端处理
+        
+        Args:
+            tts_text (str): 待合成文本
+            spk_id (str): 说话人ID
+            instruct_text (str): 指令文本
+            
+        Returns:
+            dict: 模型输入字典
+        """
         model_input = self.frontend_sft(tts_text, spk_id)
         # in instruct mode, we remove spk_embedding in llm due to information leakage
         del model_input['llm_embedding']
@@ -229,12 +339,36 @@ class CosyVoiceFrontEnd:
         return model_input
 
     def frontend_instruct2(self, tts_text, instruct_text, prompt_speech_16k, resample_rate, zero_shot_spk_id):
+        """
+        CosyVoice2的增强版Instruct模式前端处理
+        
+        Args:
+            tts_text (str): 待合成文本
+            instruct_text (str): 指令文本
+            prompt_speech_16k (Tensor): 提示语音
+            resample_rate (int): 重采样率
+            zero_shot_spk_id (str): 零样本说话人ID
+            
+        Returns:
+            dict: 模型输入字典
+        """
         model_input = self.frontend_zero_shot(tts_text, instruct_text + '<|endofprompt|>', prompt_speech_16k, resample_rate, zero_shot_spk_id)
         del model_input['llm_prompt_speech_token']
         del model_input['llm_prompt_speech_token_len']
         return model_input
 
     def frontend_vc(self, source_speech_16k, prompt_speech_16k, resample_rate):
+        """
+        语音转换模式前端处理
+        
+        Args:
+            source_speech_16k (Tensor): 源语音
+            prompt_speech_16k (Tensor): 提示语音
+            resample_rate (int): 重采样率
+            
+        Returns:
+            dict: 模型输入字典
+        """
         prompt_speech_token, prompt_speech_token_len = self._extract_speech_token(prompt_speech_16k)
         prompt_speech_resample = torchaudio.transforms.Resample(orig_freq=16000, new_freq=resample_rate)(prompt_speech_16k)
         prompt_speech_feat, prompt_speech_feat_len = self._extract_speech_feat(prompt_speech_resample)

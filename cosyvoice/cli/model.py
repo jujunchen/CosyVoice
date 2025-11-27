@@ -27,12 +27,27 @@ from cosyvoice.utils.common import TrtContextWrapper
 
 
 class CosyVoiceModel:
+    """
+    CosyVoice模型推理类
+    
+    管理LLM、Flow和HiFi-GAN三个子模型，负责实际的语音合成推理过程。
+    支持多种优化方式（JIT、TensorRT等）和流式/非流式推理。
+    """
 
     def __init__(self,
                  llm: torch.nn.Module,
                  flow: torch.nn.Module,
                  hift: torch.nn.Module,
                  fp16: bool = False):
+        """
+        初始化CosyVoice模型
+        
+        Args:
+            llm (torch.nn.Module): 大语言模型，负责生成语音token
+            flow (torch.nn.Module): Flow模型，负责将离散token转换为声学特征
+            hift (torch.nn.Module): HiFi-GAN声码器，负责将声学特征转换为波形
+            fp16 (bool): 是否使用FP16精度推理，默认False
+        """
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.llm = llm
         self.flow = flow
@@ -65,6 +80,14 @@ class CosyVoiceModel:
         self.hift_cache_dict = {}
 
     def load(self, llm_model, flow_model, hift_model):
+        """
+        加载模型权重
+        
+        Args:
+            llm_model (str): LLM模型权重文件路径
+            flow_model (str): Flow模型权重文件路径
+            hift_model (str): HiFi-GAN模型权重文件路径
+        """
         self.llm.load_state_dict(torch.load(llm_model, map_location=self.device), strict=True)
         self.llm.to(self.device).eval()
         self.flow.load_state_dict(torch.load(flow_model, map_location=self.device), strict=True)
@@ -75,6 +98,14 @@ class CosyVoiceModel:
         self.hift.to(self.device).eval()
 
     def load_jit(self, llm_text_encoder_model, llm_llm_model, flow_encoder_model):
+        """
+        加载JIT优化后的模型组件
+        
+        Args:
+            llm_text_encoder_model (str): JIT优化的LLM文本编码器模型路径
+            llm_llm_model (str): JIT优化的LLM主模型路径
+            flow_encoder_model (str): JIT优化的Flow编码器模型路径
+        """
         llm_text_encoder = torch.jit.load(llm_text_encoder_model, map_location=self.device)
         self.llm.text_encoder = llm_text_encoder
         llm_llm = torch.jit.load(llm_llm_model, map_location=self.device)
@@ -83,6 +114,15 @@ class CosyVoiceModel:
         self.flow.encoder = flow_encoder
 
     def load_trt(self, flow_decoder_estimator_model, flow_decoder_onnx_model, trt_concurrent, fp16):
+        """
+        加载TensorRT优化后的模型组件
+        
+        Args:
+            flow_decoder_estimator_model (str): TRT优化的Flow解码器估计器模型路径
+            flow_decoder_onnx_model (str): Flow解码器ONNX模型路径
+            trt_concurrent (int): TRT并发实例数
+            fp16 (bool): 是否使用FP16精度
+        """
         assert torch.cuda.is_available(), 'tensorrt only supports gpu!'
         if not os.path.exists(flow_decoder_estimator_model) or os.path.getsize(flow_decoder_estimator_model) == 0:
             convert_onnx_to_trt(flow_decoder_estimator_model, self.get_trt_kwargs(), flow_decoder_onnx_model, fp16)
@@ -94,6 +134,12 @@ class CosyVoiceModel:
         self.flow.decoder.estimator = TrtContextWrapper(estimator_engine, trt_concurrent=trt_concurrent, device=self.device)
 
     def get_trt_kwargs(self):
+        """
+        获取TensorRT优化参数
+        
+        Returns:
+            dict: TensorRT优化配置参数
+        """
         min_shape = [(2, 80, 4), (2, 1, 4), (2, 80, 4), (2, 80, 4)]
         opt_shape = [(2, 80, 500), (2, 1, 500), (2, 80, 500), (2, 80, 500)]
         max_shape = [(2, 80, 3000), (2, 1, 3000), (2, 80, 3000), (2, 80, 3000)]
@@ -101,6 +147,16 @@ class CosyVoiceModel:
         return {'min_shape': min_shape, 'opt_shape': opt_shape, 'max_shape': max_shape, 'input_names': input_names}
 
     def llm_job(self, text, prompt_text, llm_prompt_speech_token, llm_embedding, uuid):
+        """
+        LLM推理任务，在独立线程中执行
+        
+        Args:
+            text: 输入文本token
+            prompt_text: 提示文本token
+            llm_prompt_speech_token: LLM提示语音token
+            llm_embedding: LLM嵌入向量
+            uuid: 当前会话UUID
+        """
         with self.llm_context, torch.cuda.amp.autocast(self.fp16 is True and hasattr(self.llm, 'vllm') is False):
             if isinstance(text, Generator):
                 assert isinstance(self, CosyVoice2Model) and not hasattr(self.llm, 'vllm'), 'streaming input text is only implemented for CosyVoice2 and do not support vllm!'
@@ -124,10 +180,32 @@ class CosyVoiceModel:
         self.llm_end_dict[uuid] = True
 
     def vc_job(self, source_speech_token, uuid):
+        """
+        语音转换任务，在独立线程中执行
+        
+        Args:
+            source_speech_token: 源语音token
+            uuid: 当前会话UUID
+        """
         self.tts_speech_token_dict[uuid] = source_speech_token.flatten().tolist()
         self.llm_end_dict[uuid] = True
 
     def token2wav(self, token, prompt_token, prompt_feat, embedding, uuid, finalize=False, speed=1.0):
+        """
+        将语音token转换为波形
+        
+        Args:
+            token: 语音token
+            prompt_token: 提示语音token
+            prompt_feat: 提示语音特征
+            embedding: 嵌入向量
+            uuid: 当前会话UUID
+            finalize: 是否为最终处理阶段
+            speed: 语音速度
+            
+        Returns:
+            Tensor: 合成的语音波形
+        """
         with torch.cuda.amp.autocast(self.fp16):
             tts_mel, self.flow_cache_dict[uuid] = self.flow.inference(token=token.to(self.device),
                                                                       token_len=torch.tensor([token.shape[1]], dtype=torch.int32).to(self.device),
@@ -172,6 +250,25 @@ class CosyVoiceModel:
             llm_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32),
             flow_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32),
             prompt_speech_feat=torch.zeros(1, 0, 80), source_speech_token=torch.zeros(1, 0, dtype=torch.int32), stream=False, speed=1.0, **kwargs):
+        """
+        主要的TTS推理接口
+        
+        Args:
+            text: 输入文本token
+            flow_embedding: Flow模型嵌入向量
+            llm_embedding: LLM模型嵌入向量
+            prompt_text: 提示文本token
+            llm_prompt_speech_token: LLM提示语音token
+            flow_prompt_speech_token: Flow提示语音token
+            prompt_speech_feat: 提示语音特征
+            source_speech_token: 源语音token（用于VC模式）
+            stream: 是否启用流式推理
+            speed: 语音速度调节因子
+            **kwargs: 其他参数
+            
+        Yields:
+            dict: 包含合成语音的字典
+        """
         # this_uuid is used to track variables related to this inference thread
         this_uuid = str(uuid.uuid1())
         with self.lock:
@@ -238,12 +335,26 @@ class CosyVoiceModel:
 
 
 class CosyVoice2Model(CosyVoiceModel):
+    """
+    CosyVoice2模型推理类，继承自CosyVoiceModel
+    
+    针对CosyVoice2模型特性的推理实现，支持vLLM加速等新功能
+    """
 
     def __init__(self,
                  llm: torch.nn.Module,
                  flow: torch.nn.Module,
                  hift: torch.nn.Module,
                  fp16: bool = False):
+        """
+        初始化CosyVoice2模型
+        
+        Args:
+            llm (torch.nn.Module): 大语言模型
+            flow (torch.nn.Module): Flow模型
+            hift (torch.nn.Module): HiFi-GAN声码器
+            fp16 (bool): 是否使用FP16精度推理，默认False
+        """
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.llm = llm
         self.flow = flow
@@ -268,10 +379,22 @@ class CosyVoice2Model(CosyVoiceModel):
         self.hift_cache_dict = {}
 
     def load_jit(self, flow_encoder_model):
+        """
+        加载JIT优化后的Flow编码器
+        
+        Args:
+            flow_encoder_model (str): JIT优化的Flow编码器模型路径
+        """
         flow_encoder = torch.jit.load(flow_encoder_model, map_location=self.device)
         self.flow.encoder = flow_encoder
 
     def load_vllm(self, model_dir):
+        """
+        加载vLLM优化的LLM组件
+        
+        Args:
+            model_dir (str): vLLM模型目录
+        """
         export_cosyvoice2_vllm(self.llm, model_dir, self.device)
         from vllm import EngineArgs, LLMEngine
         engine_args = EngineArgs(model=model_dir,
@@ -283,6 +406,23 @@ class CosyVoice2Model(CosyVoiceModel):
         del self.llm.llm.model.model.layers
 
     def token2wav(self, token, prompt_token, prompt_feat, embedding, token_offset, uuid, stream=False, finalize=False, speed=1.0):
+        """
+        将语音token转换为波形（CosyVoice2版本）
+        
+        Args:
+            token: 语音token
+            prompt_token: 提示语音token
+            prompt_feat: 提示语音特征
+            embedding: 嵌入向量
+            token_offset: token偏移量
+            uuid: 当前会话UUID
+            stream: 是否流式处理
+            finalize: 是否为最终处理阶段
+            speed: 语音速度
+            
+        Returns:
+            Tensor: 合成的语音波形
+        """
         with torch.cuda.amp.autocast(self.fp16):
             tts_mel, _ = self.flow.inference(token=token.to(self.device),
                                              token_len=torch.tensor([token.shape[1]], dtype=torch.int32).to(self.device),
@@ -323,6 +463,25 @@ class CosyVoice2Model(CosyVoiceModel):
             llm_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32),
             flow_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32),
             prompt_speech_feat=torch.zeros(1, 0, 80), source_speech_token=torch.zeros(1, 0, dtype=torch.int32), stream=False, speed=1.0, **kwargs):
+        """
+        CosyVoice2的主要TTS推理接口
+        
+        Args:
+            text: 输入文本token
+            flow_embedding: Flow模型嵌入向量
+            llm_embedding: LLM模型嵌入向量
+            prompt_text: 提示文本token
+            llm_prompt_speech_token: LLM提示语音token
+            flow_prompt_speech_token: Flow提示语音token
+            prompt_speech_feat: 提示语音特征
+            source_speech_token: 源语音token（用于VC模式）
+            stream: 是否启用流式推理
+            speed: 语音速度调节因子
+            **kwargs: 其他参数
+            
+        Yields:
+            dict: 包含合成语音的字典
+        """
         # this_uuid is used to track variables related to this inference thread
         this_uuid = str(uuid.uuid1())
         with self.lock:
