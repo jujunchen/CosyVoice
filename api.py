@@ -22,12 +22,14 @@ import librosa
 import base64
 import io
 from typing import Optional, List, Dict, Any, Union
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import json
 import time
+import asyncio
+import wave
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
@@ -67,10 +69,10 @@ else:
     if std_logger.level == 0 or std_logger.level > std_logging.INFO:
         std_logger.setLevel(std_logging.INFO)
     # 如果可能，使用原始logging对象记录此消息，否则使用std_logging
-    if hasattr(logging, 'info'):
-        logging.info("回退：已为文件输出配置根logger，因为'cosyvoice.utils.file_utils.logging'没有addHandler。")
-    else:
-        std_logging.info("回退：已为文件输出配置根logger，因为'cosyvoice.utils.file_utils.logging'没有addHandler。")
+    # if hasattr(logging, 'info'):
+    #     logging.info("回退：已为文件输出配置根logger，因为'cosyvoice.utils.file_utils.logging'没有addHandler。")
+    # else:
+    #     std_logging.info("回退：已为文件输出配置根logger，因为'cosyvoice.utils.file_utils.logging'没有addHandler。")
 
 
 # 定义请求模型
@@ -203,7 +205,120 @@ def decode_audio(base64_audio):
     except Exception as e:
         logging.error(f"解码音频失败: {str(e)}")
         raise HTTPException(status_code=400, detail=f"音频解码失败: {str(e)}")
+
+async def tts_stream_generator(request: Request, sft_request: SftRequest):
+    """流式生成 TTS 音频的生成器函数"""
+    start_time = time.time()
+    first_token_time = None
+
+    # 关键：遍历生成器时，定期检查连接状态
+    for i in cosyvoice.inference_sft(
+        sft_request.tts_text,
+        sft_request.spk_id,
+        stream=sft_request.stream,
+        speed=sft_request.speed
+    ):
+        # 检查客户端是否断开连接
+        if await request.is_disconnected():
+            logging.info("客户端已断开连接，终止 TTS 生成")
+            break
+
+        
+        audio_data = i['tts_speech'].numpy().flatten()
+        if first_token_time is None:
+            first_token_time = time.time()
+            latency = first_token_time - start_time
+            logging.info(f"---->获取到第一个token: {latency} seconds")
+
+        audio_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
+        yield audio_bytes
+
+def convert_to_aac(audio_data, sample_rate):
+    """
+    将numpy数组转换为AAC格式的字节
     
+    Args:
+        audio_data: 音频数据numpy数组
+        sample_rate: 采样率
+        
+    Returns:
+        bytes: AAC格式的音频字节数据
+    """
+    #限制幅值防止削波
+    audio_data = np.clip(audio_data, -1.0, 1.0)
+
+    # 添加淡入淡出效果（可选）
+    fade_samples = int(0.01 * sample_rate)  # 10ms的淡入淡出
+    if len(audio_data) > 2 * fade_samples:
+        # 淡入
+        audio_data[:fade_samples] *= np.linspace(0, 1, fade_samples)
+        # 淡出
+        audio_data[-fade_samples:] *= np.linspace(1, 0, fade_samples)
+
+    # 将float32转换为int16
+    audio_int16 = (audio_data * 32767).astype(np.int16)
+    
+    # 创建临时WAV文件
+    # wav_buffer = io.BytesIO()
+    # with wave.open(wav_buffer, 'wb') as wav_file:
+    #     wav_file.setnchannels(1)  # 单声道
+    #     wav_file.setsampwidth(2)  # 16位
+    #     wav_file.setframerate(sample_rate)
+    #     wav_file.writeframes(audio_int16.tobytes())
+    
+    # # 重置缓冲区指针
+    # wav_buffer.seek(0)
+    
+    # 使用pydub将WAV转换为AAC
+    from pydub import AudioSegment
+    wav_audio = AudioSegment(
+        data=audio_int16.tobytes(),
+        sample_width=2,  # 16位=2字节
+        frame_rate=sample_rate,
+        channels=1  # 单声道
+    )
+    aac_buffer = io.BytesIO()
+    # 使用mp4容器保存AAC音频
+    wav_audio.export(aac_buffer, format="adts", codec="aac")
+    # wav_audio.export(aac_buffer, format="mp3")
+    
+    # 返回AAC字节数据
+    aac_buffer.seek(0)
+    aac_bytes = aac_buffer.read()
+    
+    return aac_bytes
+
+def convert_to_wav(audio_data, sample_rate):
+    """
+    将numpy数组转换为WAV格式的字节
+    
+    Args:
+        audio_data: 音频数据numpy数组
+        sample_rate: 采样率
+        
+    Returns:
+        bytes: WAV格式的音频字节数据
+    """
+    # 将float32转换为int16
+    audio_int16 = (audio_data * 32767).astype(np.int16)
+    
+    # 创建WAV文件头
+    buffer = io.BytesIO()
+    with io.BytesIO() as wav_file:
+        # 创建WAV文件
+        wav_writer = wave.open(wav_file, 'wb')
+        wav_writer.setnchannels(1)  # 单声道
+        wav_writer.setsampwidth(2)  # 16位
+        wav_writer.setframerate(sample_rate)
+        wav_writer.writeframes(audio_int16.tobytes())
+        wav_writer.close()
+        
+        # 获取WAV文件的字节
+        wav_file.seek(0)
+        wav_bytes = wav_file.read()
+    
+    return wav_bytes
+
 
 def create_app():
     """
@@ -249,42 +364,24 @@ def create_app():
         # 但为了完整性，可以考虑合并，不过当前cosyvoice.list_available_spks()应为权威来源
         return {"speakers": speakers_details}
 
-    @app.post("/tts/sft")
-    async def tts_sft(request: SftRequest):
+    @app.post("/tts")
+    async def tts(request: Request, sft_request: SftRequest):
         """
-        使用预训练音色合成语音
+        使用SFT模型合成语音
         
         Args:
-            request: SftRequest请求对象
+            request: Request对象
+            sft_request: SftRequest请求对象
             
         Returns:
-            StreamingResponse: WAV格式的音频流响应
+            StreamingResponse: aac格式的音频流响应
         """
-        if request.seed > 0:
-            set_all_random_seed(request.seed)
-        else:
-            set_all_random_seed(random.randint(1, 100000000))
-
-        # 添加时间记录变量
-        start_time = time.time()
-        first_token_time = None 
-        convert_acc_time = None
-        
-        def generate():
-            for i in cosyvoice.inference_sft(request.tts_text, request.spk_id, stream=request.stream, speed=request.speed):
-                audio_data = i['tts_speech'].numpy().flatten()
-
-                nonlocal start_time, first_token_time, convert_acc_time
-                if first_token_time is None:
-                    first_token_time = time.time()
-                    latency = first_token_time - start_time
-                    logging.info(f"---->获取到第一个token: {latency} seconds")   
-
-                audio_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
-
-                yield audio_bytes
-            
-        return StreamingResponse(generate(), media_type="audio/aac")
+        # 返回流式响应，媒体类型根据音频格式调整（AAC 用 audio/aac）
+        return StreamingResponse(
+            tts_stream_generator(request, sft_request),
+            media_type="audio/aac",
+            headers={"Content-Disposition": "attachment; filename=tts.aac"}
+        )
     
     @app.post("/tts/zero_shot")
     async def tts_zero_shot(request: ZeroShotRequest):
@@ -538,93 +635,6 @@ def create_app():
     
     return app
 
-def convert_to_aac(audio_data, sample_rate):
-    """
-    将numpy数组转换为AAC格式的字节
-    
-    Args:
-        audio_data: 音频数据numpy数组
-        sample_rate: 采样率
-        
-    Returns:
-        bytes: AAC格式的音频字节数据
-    """
-    #限制幅值防止削波
-    audio_data = np.clip(audio_data, -1.0, 1.0)
-
-    # 添加淡入淡出效果（可选）
-    fade_samples = int(0.02 * sample_rate)  # 10ms的淡入淡出
-    if len(audio_data) > 2 * fade_samples:
-        # 淡入
-        audio_data[:fade_samples] *= np.linspace(0, 1, fade_samples)
-        # 淡出
-        audio_data[-fade_samples:] *= np.linspace(1, 0, fade_samples)
-
-    # 将float32转换为int16
-    audio_int16 = (audio_data * 32767).astype(np.int16)
-    
-    # 创建临时WAV文件
-    # wav_buffer = io.BytesIO()
-    # with wave.open(wav_buffer, 'wb') as wav_file:
-    #     wav_file.setnchannels(1)  # 单声道
-    #     wav_file.setsampwidth(2)  # 16位
-    #     wav_file.setframerate(sample_rate)
-    #     wav_file.writeframes(audio_int16.tobytes())
-    
-    # # 重置缓冲区指针
-    # wav_buffer.seek(0)
-    
-    # 使用pydub将WAV转换为AAC
-    from pydub import AudioSegment
-    wav_audio = AudioSegment(
-        data=audio_int16.tobytes(),
-        sample_width=2,  # 16位=2字节
-        frame_rate=sample_rate,
-        channels=1  # 单声道
-    )
-    aac_buffer = io.BytesIO()
-    # 使用mp4容器保存AAC音频
-    wav_audio.export(aac_buffer, format="adts", codec="aac")
-    # wav_audio.export(aac_buffer, format="mp3")
-    
-    # 返回AAC字节数据
-    aac_buffer.seek(0)
-    aac_bytes = aac_buffer.read()
-    
-    return aac_bytes
-
-def convert_to_wav(audio_data, sample_rate):
-    """
-    将numpy数组转换为WAV格式的字节
-    
-    Args:
-        audio_data: 音频数据numpy数组
-        sample_rate: 采样率
-        
-    Returns:
-        bytes: WAV格式的音频字节数据
-    """
-    # 将float32转换为int16
-    audio_int16 = (audio_data * 32767).astype(np.int16)
-    
-    # 创建WAV文件头
-    buffer = io.BytesIO()
-    with io.BytesIO() as wav_file:
-        # 创建WAV文件
-        wav_writer = wave.open(wav_file, 'wb')
-        wav_writer.setnchannels(1)  # 单声道
-        wav_writer.setsampwidth(2)  # 16位
-        wav_writer.setframerate(sample_rate)
-        wav_writer.writeframes(audio_int16.tobytes())
-        wav_writer.close()
-        
-        # 获取WAV文件的字节
-        wav_file.seek(0)
-        wav_bytes = wav_file.read()
-    
-    return wav_bytes
-
-import wave # 确保wave在顶部导入
 
 def main():
     """
@@ -654,6 +664,7 @@ def main():
     load_speaker_names() # 应用启动时加载自定义音色名称
     
     app = create_app()
+    logging.info("API服务已启动, 地址:{}, 端口:{}".format("0.0.0.0", args.port))
     uvicorn.run(app, host="0.0.0.0", port=args.port)  # 启动服务
 
 if __name__ == '__main__':
