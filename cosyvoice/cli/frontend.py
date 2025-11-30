@@ -24,6 +24,8 @@ import torchaudio
 import os
 import re
 import inflect
+import copy
+
 try:
     import ttsfrd
     use_ttsfrd = True
@@ -332,8 +334,12 @@ class CosyVoiceFrontEnd:
         """
         model_input = self.frontend_sft(tts_text, spk_id)
         # in instruct mode, we remove spk_embedding in llm due to information leakage
-        del model_input['llm_embedding']
-        instruct_text_token, instruct_text_token_len = self._extract_text_token(instruct_text + '<endofprompt>')
+        # del model_input['llm_embedding']
+        #copy 一个model_input
+        model_input = copy.copy(model_input)
+        del model_input['llm_prompt_speech_token']
+        del model_input['llm_prompt_speech_token_len']
+        instruct_text_token, instruct_text_token_len = self._extract_text_token(instruct_text + '<|endofprompt|>')
         model_input['prompt_text'] = instruct_text_token
         model_input['prompt_text_len'] = instruct_text_token_len
         return model_input

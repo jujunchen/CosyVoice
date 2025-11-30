@@ -312,13 +312,35 @@ class CosyVoice2(CosyVoice):
                                 self.fp16)
         del configs
 
-    def inference_instruct(self, *args, **kwargs):
+    def inference_instruct(self, tts_text, spk_id, instruct_text, stream=False, speed=1.0, text_frontend=True):
         """
-        在CosyVoice2中未实现传统instruct模式
+        Instruct（指令引导）模式推理
+        
+        通过自然语言指令控制语音的情感、风格等特性
+        
+        Args:
+            tts_text (str): 待合成的文本
+            spk_id (str): 预训练说话人ID
+            instruct_text (str): 指令文本，用于控制合成语音的风格
+            stream (bool): 是否启用流式合成，默认False
+            speed (float): 语音速度调节因子，默认1.0
+            text_frontend (bool): 是否使用文本前端处理，默认True
+            
+        Yields:
+            dict: 包含合成语音的字典，键为'tts_speech'
         """
-        raise NotImplementedError('inference_instruct is not implemented for CosyVoice2!')
+        instruct_text = self.frontend.text_normalize(instruct_text, split=False, text_frontend=text_frontend)
+        for i in tqdm(self.frontend.text_normalize(tts_text, split=True, text_frontend=text_frontend)):
+            model_input = self.frontend.frontend_instruct(i, spk_id, instruct_text)
+            start_time = time.time()
+            logging.info('synthesis text {}'.format(i))
+            for model_output in self.model.tts(**model_input, stream=stream, speed=speed):
+                speech_len = model_output['tts_speech'].shape[1] / self.sample_rate
+                logging.info('yield speech len {}, rtf {}'.format(speech_len, (time.time() - start_time) / speech_len))
+                yield model_output
+                start_time = time.time()
 
-    def inference_instruct2(self, tts_text, instruct_text, prompt_speech_16k, zero_shot_spk_id='', stream=False, speed=1.0, text_frontend=True):
+    def inference_instruct2(self, tts_text, instruct_text, prompt_speech_16k='', zero_shot_spk_id='', stream=False, speed=1.0, text_frontend=True):
         """
         CosyVoice2专用的增强版Instruct模式推理
         

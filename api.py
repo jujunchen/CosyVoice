@@ -233,6 +233,18 @@ async def tts_stream_generator(request: Request, sft_request: SftRequest):
         audio_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
         yield audio_bytes
 
+async def tts_instruct_stream_generator(request: Request, instructRequest: InstructRequest):
+    """流式生成 TTS 音频的生成器函数"""
+
+    for i in cosyvoice.inference_instruct(instructRequest.tts_text, instructRequest.spk_id, instructRequest.instruct_text, stream=instructRequest.stream, speed=instructRequest.speed):
+        audio_data = i['tts_speech'].numpy().flatten()
+        # 检查客户端是否断开连接
+        if await request.is_disconnected():
+            logging.info("客户端已断开连接，终止 TTS 生成")
+            break
+        aac_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
+        yield aac_bytes
+
 def convert_to_aac(audio_data, sample_rate):
     """
     将numpy数组转换为AAC格式的字节
@@ -482,7 +494,7 @@ def create_app():
             raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
     
     @app.post("/tts/instruct")
-    async def tts_instruct(request: InstructRequest):
+    async def tts_instruct(request: Request, instructRequest: InstructRequest):
         """
         使用自然语言控制模式合成语音
         
@@ -492,42 +504,22 @@ def create_app():
         Returns:
             StreamingResponse: WAV格式的音频流响应
         """
-        try:
-            # 检查模型是否支持自然语言控制
-            if cosyvoice.instruct is False:
-                raise HTTPException(status_code=400, detail=f"当前模型不支持自然语言控制模式，请使用CosyVoice-300M-Instruct模型")
+        if not instructRequest.instruct_text:
+            sft_request = SftRequest(
+                tts_text=instructRequest.tts_text,
+                spk_id=instructRequest.spk_id,
+                stream=instructRequest.stream,
+                speed=instructRequest.speed
+            )
+            # 调用tts函数
+            return await tts(request, sft_request)
             
-            if not request.instruct_text:
-                raise HTTPException(status_code=400, detail="instruct文本不能为空")
-            
-            if request.seed > 0:
-                set_all_random_seed(request.seed)
-            else:
-                set_all_random_seed(random.randint(1, 100000000))
-            
-            if request.stream:
-                # 流式响应
-                def generate():
-                    for i in cosyvoice.inference_instruct(request.tts_text, request.spk_id, request.instruct_text, stream=request.stream, speed=request.speed):
-                        audio_data = i['tts_speech'].numpy().flatten()
-                        aac_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
-                        yield aac_bytes
-                
-                return StreamingResponse(generate(), media_type="audio/aac")
-            else:
-                # 非流式响应
-                audio_segments = []
-                for i in cosyvoice.inference_instruct(request.tts_text, request.spk_id, request.instruct_text, stream=request.stream, speed=request.speed):
-                    audio_segments.append(i['tts_speech'].numpy().flatten())
-                
-                if audio_segments:
-                    combined_audio = np.concatenate(audio_segments)
-                    audio_bytes = convert_to_aac(combined_audio, cosyvoice.sample_rate)
-                    return StreamingResponse(io.BytesIO(audio_bytes), media_type="audio/aac")
-                else:
-                    raise HTTPException(status_code=500, detail="音频生成失败")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
+        if instructRequest.seed > 0:
+            set_all_random_seed(instructRequest.seed)
+        else:
+            set_all_random_seed(random.randint(1, 100000000))
+        
+        return StreamingResponse(tts_instruct_stream_generator(request, instructRequest), media_type="audio/aac", headers={"Content-Disposition": "attachment; filename=tts.aac"})
     
     # 音色克隆
     @app.post("/clone")
