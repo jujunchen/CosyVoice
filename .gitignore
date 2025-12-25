@@ -52,3 +52,9 @@ pretrained_models/*
 *.tar
 
 logs/*
+
+runtime/triton_trtllm/cosyvoice2_llm
+runtime/triton_trtllm/CosyVoice2-0.5B
+runtime/triton_trtllm/model_repo/*
+runtime/triton_trtllm/trt_engines_bfloat16
+runtime/triton_trtllm/trt_weights_bfloat16
