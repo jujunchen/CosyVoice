@@ -30,6 +30,8 @@ import json
 import time
 import asyncio
 import wave
+from pydub import AudioSegment
+from datetime import datetime
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
@@ -230,7 +232,7 @@ async def tts_stream_generator(request: Request, sft_request: SftRequest):
             latency = first_token_time - start_time
             logging.info(f"---->获取到第一个token: {latency} seconds")
 
-        audio_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
+        audio_bytes = convert_to_mp3(audio_data, cosyvoice.sample_rate)
         yield audio_bytes
 
 async def tts_instruct_stream_generator(request: Request, instructRequest: InstructRequest):
@@ -242,19 +244,19 @@ async def tts_instruct_stream_generator(request: Request, instructRequest: Instr
         if await request.is_disconnected():
             logging.info("客户端已断开连接，终止 TTS 生成")
             break
-        aac_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
-        yield aac_bytes
+        mp3_bytes = convert_to_mp3(audio_data, cosyvoice.sample_rate)
+        yield mp3_bytes
 
-def convert_to_aac(audio_data, sample_rate):
+def convert_to_mp3(audio_data, sample_rate):
     """
-    将numpy数组转换为AAC格式的字节
+    将numpy数组转换为MP3格式的字节
     
     Args:
         audio_data: 音频数据numpy数组
         sample_rate: 采样率
         
     Returns:
-        bytes: AAC格式的音频字节数据
+        bytes: MP3格式的音频字节数据
     """
     #限制幅值防止削波
     audio_data = np.clip(audio_data, -1.0, 1.0)
@@ -270,35 +272,22 @@ def convert_to_aac(audio_data, sample_rate):
     # 将float32转换为int16
     audio_int16 = (audio_data * 32767).astype(np.int16)
     
-    # 创建临时WAV文件
-    # wav_buffer = io.BytesIO()
-    # with wave.open(wav_buffer, 'wb') as wav_file:
-    #     wav_file.setnchannels(1)  # 单声道
-    #     wav_file.setsampwidth(2)  # 16位
-    #     wav_file.setframerate(sample_rate)
-    #     wav_file.writeframes(audio_int16.tobytes())
-    
-    # # 重置缓冲区指针
-    # wav_buffer.seek(0)
-    
-    # 使用pydub将WAV转换为AAC
-    from pydub import AudioSegment
+    # 使用pydub将WAV转换为MP3
     wav_audio = AudioSegment(
         data=audio_int16.tobytes(),
         sample_width=2,  # 16位=2字节
         frame_rate=sample_rate,
         channels=1  # 单声道
     )
-    aac_buffer = io.BytesIO()
-    # 使用mp4容器保存AAC音频
-    wav_audio.export(aac_buffer, format="adts", codec="aac")
-    # wav_audio.export(aac_buffer, format="mp3")
+    mp3_buffer = io.BytesIO()
+    # 导出为MP3格式
+    wav_audio.export(mp3_buffer, format="mp3")
     
-    # 返回AAC字节数据
-    aac_buffer.seek(0)
-    aac_bytes = aac_buffer.read()
+    # 返回MP3字节数据
+    mp3_buffer.seek(0)
+    mp3_bytes = mp3_buffer.read()
     
-    return aac_bytes
+    return mp3_bytes
 
 def convert_to_wav(audio_data, sample_rate):
     """
@@ -386,15 +375,66 @@ def create_app():
             sft_request: SftRequest请求对象
             
         Returns:
-            StreamingResponse: aac格式的音频流响应
+            StreamingResponse: mp3格式的音频流响应
         """
-        # 返回流式响应，媒体类型根据音频格式调整（AAC 用 audio/aac）
+        # 返回流式响应，媒体类型根据音频格式调整（MP3 用 audio/mpeg）
         return StreamingResponse(
             tts_stream_generator(request, sft_request),
-            media_type="audio/aac",
-            headers={"Content-Disposition": "attachment; filename=tts.aac"}
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "attachment; filename=tts.mp3"}
         )
-    
+
+    @app.post("/tts/pcm")
+    async def tts_pcm(request: Request, sft_request: SftRequest):
+        """
+        使用SFT模型合成语音，返回PCM格式
+        
+        Args:
+            request: Request对象
+            sft_request: SftRequest请求对象
+            
+        Returns:
+            StreamingResponse: PCM格式的音频流响应
+        """
+        logging.info(f"接收到请求:{datetime.now()}")
+
+        async def pcm_stream_generator(request: Request, sft_request: SftRequest):
+            start_time = time.time()
+            first_token_time = None
+            
+            for i in cosyvoice.inference_sft(
+                sft_request.tts_text,
+                sft_request.spk_id,
+                stream=sft_request.stream,
+                speed=sft_request.speed
+            ):
+                if first_token_time is None:
+                    first_token_time = time.time()
+                    latency = first_token_time - start_time
+                    logging.info(f"---->First token latency: {latency} seconds")
+
+                # 检查客户端是否断开连接
+                if await request.is_disconnected():
+                    logging.info("客户端已断开连接，终止 TTS 生成")
+                    break
+                
+                audio_data = i['tts_speech'].numpy().flatten()
+                # 直接返回PCM数据
+                audio_int16 = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16)
+                yield audio_int16.tobytes()
+        
+        return StreamingResponse(
+            pcm_stream_generator(request, sft_request),
+            media_type="audio/L16",
+            headers={
+                "Content-Disposition": "attachment; filename=tts.pcm",
+                "X-Sample-Rate": str(cosyvoice.sample_rate),
+                "X-Channels": "1",
+                "X-Bit-Depth": "16"
+            }
+    )
+
+
     @app.post("/tts/zero_shot")
     async def tts_zero_shot(request: ZeroShotRequest):
         """
@@ -429,10 +469,10 @@ def create_app():
             def generate():
                 for i in cosyvoice.inference_zero_shot(request.tts_text, request.prompt_text, prompt_speech_16k, stream=request.stream, speed=request.speed):
                     audio_data = i['tts_speech'].numpy().flatten()
-                    audio_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
+                    audio_bytes = convert_to_mp3(audio_data, cosyvoice.sample_rate)
                     yield audio_bytes
                 
-            return StreamingResponse(generate(), media_type="audio/aac")
+            return StreamingResponse(generate(), media_type="audio/mpeg")
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
@@ -474,10 +514,10 @@ def create_app():
                 def generate():
                     for i in cosyvoice.inference_cross_lingual(request.tts_text, prompt_speech_16k, stream=request.stream, speed=request.speed):
                         audio_data = i['tts_speech'].numpy().flatten()
-                        audio_bytes = convert_to_aac(audio_data, cosyvoice.sample_rate)
+                        audio_bytes = convert_to_mp3(audio_data, cosyvoice.sample_rate)
                         yield audio_bytes
                 
-                return StreamingResponse(generate(), media_type="audio/aac")
+                return StreamingResponse(generate(), media_type="audio/mpeg")
             else:
                 # 非流式响应
                 audio_segments = []
@@ -486,8 +526,8 @@ def create_app():
                 
                 if audio_segments:
                     combined_audio = np.concatenate(audio_segments)
-                    audio_bytes = convert_to_aac(combined_audio, cosyvoice.sample_rate)
-                    return StreamingResponse(io.BytesIO(audio_bytes), media_type="audio/aac")
+                    audio_bytes = convert_to_mp3(combined_audio, cosyvoice.sample_rate)
+                    return StreamingResponse(io.BytesIO(audio_bytes), media_type="audio/mpeg")
                 else:
                     raise HTTPException(status_code=500, detail="音频生成失败")
         except Exception as e:
@@ -519,7 +559,7 @@ def create_app():
         else:
             set_all_random_seed(random.randint(1, 100000000))
         
-        return StreamingResponse(tts_instruct_stream_generator(request, instructRequest), media_type="audio/aac", headers={"Content-Disposition": "attachment; filename=tts.aac"})
+        return StreamingResponse(tts_instruct_stream_generator(request, instructRequest), media_type="audio/mpeg", headers={"Content-Disposition": "attachment; filename=tts.mp3"})
     
     # 音色克隆
     @app.post("/clone")
@@ -647,7 +687,7 @@ def main():
     
     global cosyvoice, default_data
     try:
-        cosyvoice = CosyVoice2(args.model_dir, load_jit=False, load_trt=True, load_vllm=True, fp16=True, trt_concurrent=4)
+        cosyvoice = CosyVoice2(args.model_dir, load_jit=True, load_trt=True, load_vllm=True, fp16=True, trt_concurrent=2)
     except Exception:
         raise TypeError('no valid model_type!')
     
