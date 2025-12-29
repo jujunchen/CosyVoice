@@ -262,7 +262,7 @@ class CosyVoiceFrontEnd:
         Args:
             tts_text (str): 要合成的目标文本
             prompt_text (str): 提示文本，用于零样本合成中的语义引导
-            prompt_speech_16k (Tensor): 提示语音，采样率为16kHz的音频数据
+            prompt_wav (Tensor): 提示语音，采样率为16kHz的音频数据
             resample_rate (int): 目标重采样率
             zero_shot_spk_id (str): 零样本说话人ID，如果提供则使用预存的说话人信息
             
@@ -343,12 +343,8 @@ class CosyVoiceFrontEnd:
         """
         model_input = self.frontend_sft(tts_text, spk_id)
         # in instruct mode, we remove spk_embedding in llm due to information leakage
-        # del model_input['llm_embedding']
-        #copy 一个model_input
-        model_input = copy.copy(model_input)
-        del model_input['llm_prompt_speech_token']
-        del model_input['llm_prompt_speech_token_len']
-        instruct_text_token, instruct_text_token_len = self._extract_text_token(instruct_text + '<|endofprompt|>')
+        del model_input['llm_embedding']
+        instruct_text_token, instruct_text_token_len = self._extract_text_token(instruct_text)
         model_input['prompt_text'] = instruct_text_token
         model_input['prompt_text_len'] = instruct_text_token_len
         return model_input
@@ -368,9 +364,14 @@ class CosyVoiceFrontEnd:
             dict: 模型输入字典
         """
         model_input = self.frontend_zero_shot(tts_text, instruct_text, prompt_wav, resample_rate, zero_shot_spk_id)
-        del model_input['llm_prompt_speech_token']
-        del model_input['llm_prompt_speech_token_len']
-        return model_input
+        instruct_text_token, instruct_text_token_len = self._extract_text_token(instruct_text)
+
+        model_input_new = copy.copy(model_input)
+        model_input_new['prompt_text'] = instruct_text_token
+        model_input_new['prompt_text_len'] = instruct_text_token_len
+        del model_input_new['llm_prompt_speech_token']
+        del model_input_new['llm_prompt_speech_token_len']
+        return model_input_new
 
     def frontend_vc(self, source_speech_16k, prompt_wav, resample_rate):
         """

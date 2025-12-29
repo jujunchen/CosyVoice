@@ -20,22 +20,20 @@ import torch
 import torchaudio
 import random
 import librosa
-import time
-
+import whisper
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
 from cosyvoice.cli.cosyvoice import AutoModel
 from cosyvoice.utils.file_utils import logging
 from cosyvoice.utils.common import set_all_random_seed
-from vllm import ModelRegistry
-from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
-ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
 inference_mode_list = ['预训练音色', '3s极速复刻', '跨语种复刻', '自然语言控制']
 instruct_dict = {'预训练音色': '1. 选择预训练音色\n2. 点击生成音频按钮',
                  '3s极速复刻': '1. 选择prompt音频文件，或录入prompt音频，注意不超过30s，若同时提供，优先选择prompt音频文件\n2. 输入prompt文本\n3. 点击生成音频按钮',
                  '跨语种复刻': '1. 选择prompt音频文件，或录入prompt音频，注意不超过30s，若同时提供，优先选择prompt音频文件\n2. 点击生成音频按钮',
-                 '自然语言控制': '1. 选择预训练音色\n2. 输入instruct文本\n3. 点击生成音频按钮'}
+                 '自然语言控制': '1. 选择预训练音色\n2. 输入instruct文本\n3. 点击生成音频按钮',
+                 '克隆音色': '1. 选择prompt音频文件，或录入prompt音频，注意不超过30s，若同时提供，优先选择prompt音频文件\n2. 输入prompt文本\n3. 点击生成音频按钮1. 选择预训练音色\n2. 点击生成音频按钮'
+                 }
 stream_mode_list = [('否', False), ('是', True)]
 max_val = 0.8
 
@@ -52,12 +50,22 @@ def change_instruction(mode_checkbox_group):
     return instruct_dict[mode_checkbox_group]
 
 
+def transcribe_audio(audio_path, whisper_model):
+    """使用Whisper将音频转录为文本"""
+    if audio_path is None or whisper_model is None:
+        return ""
+    
+    try:
+        # 转录音频
+        result = whisper_model.transcribe(audio_path, fp16=True)
+        return result["text"].strip()
+    except Exception as e:
+        print(f"ASR转录错误: {str(e)}")
+        return ""
+
+
 def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
                    seed, stream, speed):
-    # 添加时间记录变量
-    start_time = time.time()
-    first_token_time = None
-
     if prompt_wav_upload is not None:
         prompt_wav = prompt_wav_upload
     elif prompt_wav_record is not None:
@@ -66,14 +74,9 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
         prompt_wav = None
     # if instruct mode, please make sure that model is iic/CosyVoice-300M-Instruct and not cross_lingual mode
     if mode_checkbox_group in ['自然语言控制']:
-        if cosyvoice.instruct is False:
-            gr.Warning('您正在使用自然语言控制模式, {}模型不支持此模式, 请使用iic/CosyVoice-300M-Instruct模型'.format(args.model_dir))
-            yield (cosyvoice.sample_rate, default_data)
         if instruct_text == '':
-            gr.Warning('您正在使用自然语言控制模式, 请输入instruct文本')
+            gr.Warning('您正在使用自然语言控制模式, 请输入instruct文本。prompt音频和预训练音色同时存在，prompt音频优先。')
             yield (cosyvoice.sample_rate, default_data)
-        if prompt_wav is not None or prompt_text != '':
-            gr.Info('您正在使用自然语言控制模式, prompt音频/prompt文本会被忽略')
     # if cross_lingual mode, please make sure that model is iic/CosyVoice-300M and tts_text prompt_text are different language
     if mode_checkbox_group in ['跨语种复刻']:
         if cosyvoice.instruct is True:
@@ -112,10 +115,6 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
         logging.info('get sft inference request')
         set_all_random_seed(seed)
         for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
-            if first_token_time is None:
-                first_token_time = time.time()
-                latency = first_token_time - start_time
-                logging.info(f"---->First token latency: {latency} seconds")
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
     elif mode_checkbox_group == '3s极速复刻':
         logging.info('get zero_shot inference request')
@@ -130,16 +129,63 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
     else:
         logging.info('get instruct inference request')
         set_all_random_seed(seed)
-        for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
+        if prompt_wav and sft_dropdown:
+            zero_shot_spk_id = ''
+        else:
+            zero_shot_spk_id = sft_dropdown    
+            
+        for i in cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_wav, zero_shot_spk_id, stream=stream, speed=speed):
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+
+def clone_voice(prompt_wav_upload, prompt_wav_record, prompt_text, zero_shot_spk_id):
+    if prompt_wav_upload is not None:
+        prompt_wav = prompt_wav_upload
+    elif prompt_wav_record is not None:
+        prompt_wav = prompt_wav_record
+    else:
+        prompt_wav = None
+    
+    if prompt_wav is None:
+        gr.Warning('请提供用于克隆的音频文件')
+    
+    if prompt_text == '':
+        gr.Warning('请提供用于克隆的文本')
+
+    if zero_shot_spk_id == '':
+        gr.Warning('请输入克隆音色名称')    
+    
+    # 检查音频采样率
+    if torchaudio.info(prompt_wav).sample_rate < prompt_sr:
+        gr.Warning('prompt音频采样率{}低于{}'.format(torchaudio.info(prompt_wav).sample_rate, prompt_sr))
+    
+    try:
+        # 使用inference_zero_shot进行音色克隆
+        # 实际上，克隆的音色会保存在模型内部，我们只需要验证克隆是否成功
+        result =  cosyvoice.add_zero_shot_spk(prompt_text, prompt_wav, zero_shot_spk_id)
+        cosyvoice.save_spkinfo()
+        
+        if result:
+            gr.Success("音色克隆成功")
+            # 获取更新后的可用音色列表
+            updated_sft_spk = cosyvoice.list_available_spks()
+            return gr.update(choices=updated_sft_spk, label='选择预训练音色', value=updated_sft_spk[0], scale=0.25)
+        else:
+            gr.Error("音色克隆失败")
+            return gr.update()
+    except Exception as e:
+        gr.Error(f"音色克隆失败: {str(e)}")
+        return gr.update()
 
 
 def main():
+    # 加载whisper模型
+    whisper_model = whisper.load_model("small", download_root="pretrained_models/whisper")
+    
     with gr.Blocks() as demo:
-        gr.Markdown("### 代码库 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) \
-                    预训练模型 [CosyVoice-300M](https://www.modelscope.cn/models/iic/CosyVoice-300M) \
-                    [CosyVoice-300M-Instruct](https://www.modelscope.cn/models/iic/CosyVoice-300M-Instruct) \
-                    [CosyVoice-300M-SFT](https://www.modelscope.cn/models/iic/CosyVoice-300M-SFT)")
+        # gr.Markdown("### 代码库 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) \
+        #             预训练模型 [CosyVoice-300M](https://www.modelscope.cn/models/iic/CosyVoice-300M) \
+        #             [CosyVoice-300M-Instruct](https://www.modelscope.cn/models/iic/CosyVoice-300M-Instruct) \
+        #             [CosyVoice-300M-SFT](https://www.modelscope.cn/models/iic/CosyVoice-300M-SFT)")
         gr.Markdown("#### 请输入需要合成的文本，选择推理模式，并按照提示步骤进行操作")
 
         tts_text = gr.Textbox(label="输入合成文本", lines=1, value="我是通义实验室语音团队全新推出的生成式语音大模型，提供舒适自然的语音合成能力。")
@@ -158,18 +204,37 @@ def main():
             prompt_wav_record = gr.Audio(sources='microphone', type='filepath', label='录制prompt音频文件')
         prompt_text = gr.Textbox(label="输入prompt文本", lines=1, placeholder="请输入prompt文本，需与prompt音频内容一致，暂时不支持自动识别...", value='')
         instruct_text = gr.Textbox(label="输入instruct文本", lines=1, placeholder="请输入instruct文本.", value='')
+        spk_id = gr.Textbox(label="输入克隆音色名称", lines=1, placeholder="输入克隆音色名称.", value='')
 
-        generate_button = gr.Button("生成音频")
+        with gr.Row():
+            generate_button = gr.Button("生成音频")
+            clone_button = gr.Button("克隆音色")
 
         audio_output = gr.Audio(label="合成音频", autoplay=True, streaming=True)
+
+        # 添加音频上传或录制后的ASR转录功能
+        prompt_wav_upload.change(
+            fn=lambda audio_path: transcribe_audio(audio_path, whisper_model),
+            inputs=[prompt_wav_upload],
+            outputs=[prompt_text]
+        )
+        
+        prompt_wav_record.change(
+            fn=lambda audio_path: transcribe_audio(audio_path, whisper_model),
+            inputs=[prompt_wav_record],
+            outputs=[prompt_text]
+        )
 
         seed_button.click(generate_seed, inputs=[], outputs=seed)
         generate_button.click(generate_audio,
                               inputs=[tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
                                       seed, stream, speed],
                               outputs=[audio_output])
+        clone_button.click(clone_voice,
+                           inputs=[prompt_wav_upload, prompt_wav_record, prompt_text, spk_id],
+                           outputs=[sft_dropdown])
         mode_checkbox_group.change(fn=change_instruction, inputs=[mode_checkbox_group], outputs=[instruction_text])
-    demo.queue(max_size=4, default_concurrency_limit=3)
+    demo.queue(max_size=4, default_concurrency_limit=2)
     demo.launch(server_name='0.0.0.0', server_port=args.port)
 
 
@@ -177,7 +242,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port',
                         type=int,
-                        default=8000)
+                        default=18000)
     parser.add_argument('--model_dir',
                         type=str,
                         default='pretrained_models/Fun-CosyVoice3-0.5B',
@@ -185,6 +250,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     cosyvoice = AutoModel(model_dir=args.model_dir, load_trt=True, load_vllm=True, fp16=True)
 
+    global sft_spk
     sft_spk = cosyvoice.list_available_spks()
     if len(sft_spk) == 0:
         sft_spk = ['']

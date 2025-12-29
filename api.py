@@ -16,7 +16,6 @@ import sys
 import argparse
 import numpy as np
 import torch
-import torchaudio
 import random
 import librosa
 import base64
@@ -26,10 +25,10 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTa
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import json
 import time
-import asyncio
 import wave
+import tempfile
+import os
 from pydub import AudioSegment
 from datetime import datetime
 
@@ -37,12 +36,9 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
 
 # 导入CosyVoice相关模块
-from cosyvoice.cli.cosyvoice import CosyVoice2
+from cosyvoice.cli.cosyvoice import CosyVoice3
 from cosyvoice.utils.file_utils import load_wav, logging
 from cosyvoice.utils.common import set_all_random_seed
-from vllm import ModelRegistry
-from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
-ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
 # 配置文件日志记录
 import logging as std_logging # 为了访问FileHandler, Formatter等，因为'logging'已被占用
@@ -112,51 +108,11 @@ class InstructRequest(BaseModel):
     speed: float = 1.0        # 语音速度调节因子
     seed: int = 0             # 随机种子
 
-class SpeakerDetail(BaseModel):
-    """说话人详情模型"""
-    spk_id: str     # 说话人ID
-    spk_name: str   # 说话人名称
-
-class AvailableSpksResponse(BaseModel):
-    """可用说话人列表响应模型"""
-    speakers: List[SpeakerDetail]  # 说话人详情列表
-
 class SpeakerPromptSaveRequest(BaseModel):
     """说话人提示保存请求模型"""
     spk_id: str = Field(..., description="保存提示的说话人ID")
     prompt_text: str = Field(..., description="伴随提示音频的文本")
     prompt_audio_base64: str = Field(..., description="Base64编码的提示音频数据")
-
-# 用于存储自定义音色名称
-SPEAKER_NAMES_FILE = "speaker_names.json"  # 自定义音色名称存储文件
-SPEAKER_NAMES: Dict[str, str] = {}         # 音色名称映射字典
-
-def load_speaker_names():
-    """
-    从JSON文件加载自定义音色名称
-    """
-    global SPEAKER_NAMES
-    if os.path.exists(SPEAKER_NAMES_FILE):
-        try:
-            with open(SPEAKER_NAMES_FILE, 'r', encoding='utf-8') as f:
-                SPEAKER_NAMES = json.load(f)
-            logging.info(f"自定义音色名称已从 {SPEAKER_NAMES_FILE} 加载。")
-        except Exception as e:
-            logging.error(f"加载自定义音色名称失败: {e}")
-    else:
-        logging.info(f"{SPEAKER_NAMES_FILE} 未找到，将使用空的音色名称列表。")
-
-def save_speaker_names():
-    """
-    将自定义音色名称保存到JSON文件
-    """
-    global SPEAKER_NAMES
-    try:
-        with open(SPEAKER_NAMES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(SPEAKER_NAMES, f, ensure_ascii=False, indent=4)
-        logging.info(f"自定义音色名称已保存到 {SPEAKER_NAMES_FILE}。")
-    except Exception as e:
-        logging.error(f"保存自定义音色名称失败: {e}")
 
 # 音频处理参数
 max_val = 0.8       # 音频最大幅度值
@@ -238,7 +194,7 @@ async def tts_stream_generator(request: Request, sft_request: SftRequest):
 async def tts_instruct_stream_generator(request: Request, instructRequest: InstructRequest):
     """流式生成 TTS 音频的生成器函数"""
 
-    for i in cosyvoice.inference_instruct(instructRequest.tts_text, instructRequest.spk_id, instructRequest.instruct_text, stream=instructRequest.stream, speed=instructRequest.speed):
+    for i in cosyvoice.inference_instruct2(instructRequest.tts_text, instructRequest.instruct_text, '', instructRequest.spk_id, stream=instructRequest.stream, speed=instructRequest.speed):
         audio_data = i['tts_speech'].numpy().flatten()
         # 检查客户端是否断开连接
         if await request.is_disconnected():
@@ -344,9 +300,9 @@ def create_app():
         """
         根路径，返回API服务基本信息
         """
-        return {"message": "欢迎使用CosyVoice API服务", "version": "1.0.0"}
+        return {"message": "欢迎使用CosyVoice API服务", "version": "3.0.0"}
     
-    @app.get("/available_spks", response_model=AvailableSpksResponse)
+    @app.get("/available_spks")
     def get_available_spks():
         """
         获取可用的预训练音色列表（包括自定义音色）
@@ -354,16 +310,9 @@ def create_app():
         Returns:
             AvailableSpksResponse: 可用说话人列表响应
         """
-        spk_ids = cosyvoice.list_available_spks() # 这通常包括预设和已通过add_zero_shot_spk添加的
-        speakers_details = []
-        for spk_id in spk_ids:
-            # 优先从SPEAKER_NAMES获取自定义名称，否则默认为spk_id
-            spk_name = SPEAKER_NAMES.get(spk_id, spk_id)
-            speakers_details.append(SpeakerDetail(spk_id=spk_id, spk_name=spk_name))
+        spk_ids = cosyvoice.list_available_spks() # 这通常包括预设和已通过add_zero_shot_spk添加的  
         
-        # 对于仅存在于SPEAKER_NAMES中但可能未在cosyvoice内部列表的（理论上不应发生如果保存逻辑正确）
-        # 但为了完整性，可以考虑合并，不过当前cosyvoice.list_available_spks()应为权威来源
-        return {"speakers": speakers_details}
+        return {"speakers": spk_ids}
 
     @app.post("/tts")
     async def tts(request: Request, sft_request: SftRequest):
@@ -459,7 +408,7 @@ def create_app():
         
         try:
             # 加载并处理音频
-            prompt_speech_16k = postprocess(load_wav(prompt_wav_file, prompt_sr))
+            prompt_wav = load_wav(prompt_wav_file, prompt_sr)
             
             if request.seed > 0:
                 set_all_random_seed(request.seed)
@@ -467,7 +416,7 @@ def create_app():
                 set_all_random_seed(random.randint(1, 100000000))
             
             def generate():
-                for i in cosyvoice.inference_zero_shot(request.tts_text, request.prompt_text, prompt_speech_16k, stream=request.stream, speed=request.speed):
+                for i in cosyvoice.inference_zero_shot(request.tts_text, request.prompt_text, prompt_wav, stream=request.stream, speed=request.speed):
                     audio_data = i['tts_speech'].numpy().flatten()
                     audio_bytes = convert_to_mp3(audio_data, cosyvoice.sample_rate)
                     yield audio_bytes
@@ -480,7 +429,7 @@ def create_app():
     @app.post("/tts/cross_lingual")
     async def tts_cross_lingual(request: CrossLingualRequest):
         """
-        使用跨语种复刻模式合成语音
+        使用跨语种复刻模式合成语音(没有调试)
         
         Args:
             request: CrossLingualRequest请求对象
@@ -565,7 +514,6 @@ def create_app():
     @app.post("/clone")
     async def clone(prompt_text: str = Form(...), 
                               spk_id: str = Form(...), 
-                              spk_name: Optional[str] = Form(None), # 新增音色名称参数
                               prompt_audio: UploadFile = File(...)):
         """
         保存用户上传的音色prompt
@@ -573,7 +521,6 @@ def create_app():
         Args:
             prompt_text: 提示文本
             spk_id: 说话人ID
-            spk_name: 说话人名称（可选）
             prompt_audio: 提示音频文件
             
         Returns:
@@ -587,62 +534,36 @@ def create_app():
 
         if not spk_id:
             raise HTTPException(status_code=400, detail="spk_id 不能为空")
-
-        # 从 UploadFile 对象获取音频
-        # 注意：load_wav 需要能够处理 UploadFile.file，它是一个 SpooledTemporaryFile
-        # 或者先将 UploadFile 保存到临时文件再读取
-        # 为简单起见，这里假设 load_wav 可以直接处理 file-like object
-        # 如果不行，需要先 await prompt_audio.read() 然后用 io.BytesIO 包装
-        prompt_wav_file = prompt_audio.file
-
         try:
-            # 加载并处理音频
-            prompt_speech_16k = postprocess(load_wav(prompt_wav_file, prompt_sr))
-
-            cosyvoice.add_zero_shot_spk(prompt_text, prompt_speech_16k, spk_id)
-
-            # Use frontend_zero_shot to get all necessary features including embeddings
-            # Pass tts_text='' and zero_shot_spk_id='' to ensure fresh extraction
-            # model_input_data = cosyvoice.frontend.frontend_zero_shot(
-            #     tts_text='',
-            #     prompt_text=prompt_text,
-            #     prompt_speech_16k=prompt_speech_16k,
-            #     resample_rate=cosyvoice.sample_rate,
-            #     zero_shot_spk_id=''
-            # )
-
-            # # Remove fields related to tts_text as they are not part of a speaker prompt
-            # if 'text' in model_input_data:
-            #     del model_input_data['text']
-            # if 'text_len' in model_input_data:
-            #     del model_input_data['text_len']
-
-            # # Add the 'embedding' key directly for SFT compatibility,
-            # # using the llm_embedding (which is the speaker embedding).
-            # if 'llm_embedding' in model_input_data:
-            #     model_input_data['embedding'] = model_input_data['llm_embedding']
-            # else:
-            #     # Fallback or error if llm_embedding is somehow missing
-            #     logging.error("llm_embedding not found in frontend_zero_shot output. Cannot save speaker for SFT.")
-            #     raise HTTPException(status_code=500, detail="音色特征提取失败，缺少llm_embedding")
-
-            # Store the processed information in spk2info
-            # cosyvoice.frontend.spk2info[spk_id] = model_input_data
+            # 读取上传的音频文件内容
+            contents = await prompt_audio.read()
+            
+            # 创建一个临时文件来存储音频内容
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(prompt_audio.filename)[1]) as temp_file:
+                temp_file.write(contents)
+                temp_file_path = temp_file.name
+            
+            # 将临时文件路径传递给add_zero_shot_spk，让前端处理函数内部完成加载和处理
+            cosyvoice.add_zero_shot_spk(prompt_text, temp_file_path, spk_id)
 
             # Persist the updated spk2info
             cosyvoice.save_spkinfo()
 
-            # 保存或更新自定义音色名称
-            actual_spk_name = spk_name if spk_name and spk_name.strip() else spk_id
-            SPEAKER_NAMES[spk_id] = actual_spk_name
-            save_speaker_names() # 保存自定义音色名称到JSON文件
+            # 删除临时文件
+            os.unlink(temp_file_path)
 
-            return JSONResponse(content={"status": "success", "message": f"音色 '{actual_spk_name}' (ID: {spk_id}) 保存成功", "spk_id": spk_id, "spk_name": actual_spk_name}, status_code=200)
+            return JSONResponse(content={"status": "success", "message": f"音色ID: {spk_id} 保存成功", "spk_id": spk_id}, status_code=200)
         except Exception as e:
             # print(e)
             logging.error(f"保存音色 {spk_id} 失败 (raw): {e}") # Log with repr for more detail
             # Sanitize the error message for the HTTP response
-            detail_message = f"保存音色 {spk_id} 失败:"
+            detail_message = f"保存音色 {spk_id} 失败: {str(e)}"
+            # 确保临时文件被清理
+            if 'temp_file_path' in locals():
+                try:
+                    os.unlink(temp_file_path)
+                except:
+                    pass
             raise HTTPException(status_code=500, detail=detail_message)
 
     # 文件上传接口，用于上传prompt音频
@@ -681,19 +602,17 @@ def main():
                         default=5000)
     parser.add_argument('--model_dir',
                         type=str,
-                        default='pretrained_models/CosyVoice2-0.5B',
+                        default='pretrained_models/Fun-CosyVoice3-0.5B',
                         help='local path or modelscope repo id')  # 模型路径或ModelScope仓库ID
     args = parser.parse_args()
     
     global cosyvoice, default_data
     try:
-        cosyvoice = CosyVoice2(args.model_dir, load_jit=True, load_trt=True, load_vllm=True, fp16=True, trt_concurrent=2)
+        cosyvoice = CosyVoice3(args.model_dir, load_trt=True, load_vllm=True, fp16=True, trt_concurrent=2)
     except Exception:
         raise TypeError('no valid model_type!')
     
     default_data = np.zeros(cosyvoice.sample_rate)
-
-    load_speaker_names() # 应用启动时加载自定义音色名称
     
     app = create_app()
     logging.info("API服务已启动, 地址:{}, 端口:{}".format("0.0.0.0", args.port))
