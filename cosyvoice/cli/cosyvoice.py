@@ -318,7 +318,7 @@ class CosyVoice2(CosyVoice):
         Args:
             tts_text (str): 待合成的文本
             instruct_text (str): 指令文本，用于控制合成语音的风格
-            prompt_speech_16k (Tensor): 提示语音（16kHz采样率）
+            prompt_wav (Tensor): 提示语音（16kHz采样率）
             zero_shot_spk_id (str): 预定义的零样本说话人ID，可选
             stream (bool): 是否启用流式合成，默认False
             speed (float): 语音速度调节因子，默认1.0

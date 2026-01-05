@@ -4,15 +4,15 @@
 
 # 控制要运行的阶段（stage）范围：
 # 从 stage 开始，一直到 stop_stage 结束，中间每个阶段都有独立的 if 块
-stage=-1
-stop_stage=3
+stage=5
+stop_stage=5
 
 # LibriTTS 数据集下载地址
 data_url=www.openslr.org/resources/60
 # LibriTTS 数据存放目录（需要根据自己机器实际路径修改）
-data_dir=data/input
+data_dir=/mnt/nvme0/projects/CosyVoice/examples/zhuji/cosyvoice3/data/input
 # 预训练 CosyVoice3 模型目录
-pretrained_model_dir=../../../pretrained_models/CosyVoice3-0.5B
+pretrained_model_dir=../../../pretrained_models/Fun-CosyVoice3-0.5B
 
 # stage -1：下载 LibriTTS 原始数据
 # if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
@@ -71,7 +71,7 @@ fi
 # ================== 下面是训练与模型导出相关部分 ==================
 
 # 训练 LLM / flow / hifigan 所用 GPU 设置
-export CUDA_VISIBLE_DEVICES="0,1,2,3"
+export CUDA_VISIBLE_DEVICES="0"
 # 解析可见 GPU 数量
 num_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
 # 分布式训练的作业 ID（任意标识）
@@ -80,7 +80,7 @@ job_id=1986
 dist_backend="nccl"
 # DataLoader 相关参数
 num_workers=2
-prefetch=100
+prefetch=30
 # 训练引擎，可选 torch_ddp / deepspeed 等
 train_engine=torch_ddp
 
@@ -88,22 +88,22 @@ train_engine=torch_ddp
 if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
   echo "Run train. We only support llm traning for now"
   # 如果使用 deepspeed，则有独立的优化器配置
-  if [ $train_engine == 'deepspeed' ]; then
+  if [ $train_engine = 'deepspeed' ]; then
     echo "Notice deepspeed has its own optimizer config. Modify conf/ds_stage2.json if necessary"
   fi
   # 组合训练/开发集的 parquet 列表
-  cat data/{train}/parquet/data.list > data/train.data.list
-  cat data/{test}/parquet/data.list > data/test.data.list
+  cat data/output/train/parquet/data.list > data/output/train.data.list
+  cat data/output/test/parquet/data.list > data/output/test.data.list
   # NOTE: 这里提示后续会更新 llm/hift 训练
-  for model in llm flow hifigan; do
+  for model in flow; do
     # 使用 torchrun 启动分布式训练
     torchrun --nnodes=1 --nproc_per_node=$num_gpus \
         --rdzv_id=$job_id --rdzv_backend="c10d" --rdzv_endpoint="localhost:1234" \
       cosyvoice/bin/train.py \
       --train_engine $train_engine \
       --config conf/cosyvoice3.yaml \
-      --train_data data/train.data.list \
-      --cv_data data/test.data.list \
+      --train_data data/output/train.data.list \
+      --cv_data data/output/test.data.list \
       --qwen_pretrain_path $pretrained_model_dir/CosyVoice-BlankEN \
       --model $model \
       --checkpoint $pretrained_model_dir/$model.pt \
@@ -122,12 +122,12 @@ fi
 # stage 6：对训练好的模型做参数平均，生成最终 checkpoint
 average_num=5
 if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
-  for model in llm flow hifigan; do
-    decode_checkpoint=`pwd`/exp/cosyvoice/$model/$train_engine/${model}.pt
+  for model in flow hift; do
+    decode_checkpoint=`pwd`/exp/cosyvoice3/$model/$train_engine/${model}.pt
     echo "do model average and final checkpoint is $decode_checkpoint"
     python cosyvoice/bin/average_model.py \
       --dst_model $decode_checkpoint \
-      --src_path `pwd`/exp/cosyvoice/$model/$train_engine  \
+      --src_path `pwd`/exp/cosyvoice3/$model/$train_engine  \
       --num ${average_num} \
       --val_best
   done

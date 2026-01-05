@@ -52,10 +52,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--src_dir',
                         type=str,
-                        default='/Users/chenjujun/python/CosyVoice/examples/zhuji/data/input')
+                        default='/mnt/nvme0/projects/CosyVoice/examples/zhuji/cosyvoice3/data/input')
     parser.add_argument('--des_dir',
                         type=str,
-                        default='/Users/chenjujun/python/CosyVoice/examples/zhuji/data/output')
+                        default='/mnt/nvme0/projects/CosyVoice/examples/zhuji/cosyvoice3/data/output')
     parser.add_argument('--instruct',
                         action='store_true',
                         default=True,
