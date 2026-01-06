@@ -65,7 +65,7 @@ class CosyVoiceFrontEnd:
                                                                      providers=["CUDAExecutionProvider" if torch.cuda.is_available() else
                                                                                 "CPUExecutionProvider"])
         if os.path.exists(spk2info):
-            self.spk2info = torch.load(spk2info, map_location=self.device)
+            self.spk2info = torch.load(spk2info, map_location=self.device, weights_only=True)
         else:
             self.spk2info = {}
         self.allowed_special = allowed_special
@@ -301,7 +301,7 @@ class CosyVoiceFrontEnd:
                            'llm_embedding': embedding, 'flow_embedding': embedding}
         else:
             # 如果指定了预定义的说话人ID，则直接使用预存的说话人信息
-            model_input = self.spk2info[zero_shot_spk_id]
+            model_input = {**self.spk2info[zero_shot_spk_id]}
             
         # 将目标文本及其长度添加到模型输入中
         model_input['text'] = tts_text_token

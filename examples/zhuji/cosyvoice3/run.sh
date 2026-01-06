@@ -80,7 +80,7 @@ job_id=1986
 dist_backend="nccl"
 # DataLoader 相关参数
 num_workers=2
-prefetch=30
+prefetch=100
 # 训练引擎，可选 torch_ddp / deepspeed 等
 train_engine=torch_ddp
 
@@ -95,7 +95,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
   cat data/output/train/parquet/data.list > data/output/train.data.list
   cat data/output/test/parquet/data.list > data/output/test.data.list
   # NOTE: 这里提示后续会更新 llm/hift 训练
-  for model in flow; do
+  for model in hifigan; do
     # 使用 torchrun 启动分布式训练
     torchrun --nnodes=1 --nproc_per_node=$num_gpus \
         --rdzv_id=$job_id --rdzv_backend="c10d" --rdzv_endpoint="localhost:1234" \
@@ -122,7 +122,7 @@ fi
 # stage 6：对训练好的模型做参数平均，生成最终 checkpoint
 average_num=5
 if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
-  for model in flow hift; do
+  for model in hift; do
     decode_checkpoint=`pwd`/exp/cosyvoice3/$model/$train_engine/${model}.pt
     echo "do model average and final checkpoint is $decode_checkpoint"
     python cosyvoice/bin/average_model.py \

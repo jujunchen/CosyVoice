@@ -287,7 +287,6 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
                  token_mel_ratio: int = 2,
                  pre_lookahead_len: int = 3,
                  pre_lookahead_layer: torch.nn.Module = None,
-                 encoder: torch.nn.Module = None,
                  decoder: torch.nn.Module = None,
                  decoder_conf: Dict = {'in_channels': 240, 'out_channel': 80, 'spk_emb_dim': 80, 'n_spks': 1,
                                        'cfm_params': DictConfig({'sigma_min': 1e-06, 'solver': 'euler', 't_scheduler': 'cosine',
@@ -306,8 +305,6 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         self.spk_embed_affine_layer = torch.nn.Linear(spk_embed_dim, output_size)
         self.pre_lookahead_len = pre_lookahead_len
         self.pre_lookahead_layer = pre_lookahead_layer
-        self.encoder = encoder
-        self.encoder_proj = torch.nn.Linear(self.encoder.output_size(), output_size)
         self.decoder = decoder
         self.only_mask_loss = only_mask_loss
         self.token_mel_ratio = token_mel_ratio
@@ -335,8 +332,9 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         token = self.input_embedding(torch.clamp(token, min=0)) * mask
 
         # text encode
-        h, h_lengths = self.encoder(token, token_len, streaming=streaming)
-        h = self.encoder_proj(h)
+        h = self.pre_lookahead_layer(token)
+        h = h.repeat_interleave(self.token_mel_ratio, dim=1)
+        mask = mask.repeat_interleave(self.token_mel_ratio, dim=1).squeeze(dim=-1)
 
         # get conditions
         conds = torch.zeros(feat.shape, device=token.device)
@@ -347,7 +345,6 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
             conds[i, :index] = feat[i, :index]
         conds = conds.transpose(1, 2)
 
-        mask = (~make_pad_mask(h_lengths.sum(dim=-1).squeeze(dim=1))).to(h)
         loss, _ = self.decoder.compute_loss(
             feat.transpose(1, 2).contiguous(),
             mask.unsqueeze(1),

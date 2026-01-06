@@ -5,6 +5,7 @@ from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
 ModelRegistry.register_model("CosyVoice2ForCausalLM", CosyVoice2ForCausalLM)
 
 from cosyvoice.cli.cosyvoice import AutoModel
+from cosyvoice.cli.cosyvoice import AutoModel
 from cosyvoice.utils.common import set_all_random_seed
 from tqdm import tqdm
 

@@ -174,6 +174,8 @@ def main():
     executor.step = start_step
 
     # Init scaler, used for pytorch amp mixed precision training
+    # NOTE: do NOT pass device as the first positional arg. Previously "cuda" was passed by mistake
+    # which becomes the init_scale (a number) and later causes torch.full to receive a string.
     scaler = torch.cuda.amp.GradScaler() if args.use_amp else None
     print('start step {} start epoch {}'.format(start_step, start_epoch))
 

@@ -36,9 +36,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/../../..'.format(ROOT_DIR))
 # 将第三方库Matcha-TTS目录添加到Python路径中
 sys.path.append('{}/../../../third_party/Matcha-TTS'.format(ROOT_DIR))
-
-# 导入CosyVoice相关的类和工具函数
-from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
+from cosyvoice.cli.cosyvoice import AutoModel
 from cosyvoice.utils.file_utils import load_wav
 from vllm import ModelRegistry
 from cosyvoice.vllm.cosyvoice2 import CosyVoice2ForCausalLM
@@ -169,19 +167,9 @@ if __name__ == '__main__':
     # 添加模型目录参数，默认为'iic/CosyVoice-300M'
     parser.add_argument('--model_dir',
                         type=str,
-                        default='/home/cjj/projects/CosyVoice/pretrained_models/CosyVoice2-0.5B',
+                        default='iic/CosyVoice2-0.5B',
                         help='local path or modelscope repo id')
     # 解析命令行参数
     args = parser.parse_args()
-    
-    # 尝试加载CosyVoice模型，如果失败则尝试CosyVoice2模型
-    # try: #不用cosyvoice1
-    #     cosyvoice = CosyVoice(args.model_dir)
-    # except Exception:
-    try:
-        cosyvoice = CosyVoice2(args.model_dir, load_jit=False, load_trt=True, load_vllm=True, fp16=True, trt_concurrent=4)
-    except Exception:
-        raise TypeError('no valid model_type!')
-            
-    # 启动FastAPI应用服务器
+    cosyvoice = AutoModel(model_dir=args.model_dir)
     uvicorn.run(app, host="0.0.0.0", port=args.port)

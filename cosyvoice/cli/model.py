@@ -75,6 +75,7 @@ class CosyVoiceModel:
         self.mel_overlap_dict = {}
         self.flow_cache_dict = {}
         self.hift_cache_dict = {}
+        self.silent_tokens = []
 
     def load(self, llm_model, flow_model, hift_model):
         """
@@ -85,12 +86,12 @@ class CosyVoiceModel:
             flow_model (str): Flow模型权重文件路径
             hift_model (str): HiFi-GAN模型权重文件路径
         """
-        self.llm.load_state_dict(torch.load(llm_model, map_location=self.device), strict=False)
+        self.llm.load_state_dict(torch.load(llm_model, map_location=self.device, weights_only=True), strict=False)
         self.llm.to(self.device).eval()
-        self.flow.load_state_dict(torch.load(flow_model, map_location=self.device), strict=False)
+        self.flow.load_state_dict(torch.load(flow_model, map_location=self.device, weights_only=True), strict=False)
         self.flow.to(self.device).eval()
         # in case hift_model is a hifigan model
-        hift_state_dict = {k.replace('generator.', ''): v for k, v in torch.load(hift_model, map_location=self.device).items()}
+        hift_state_dict = {k.replace('generator.', ''): v for k, v in torch.load(hift_model, map_location=self.device, weights_only=True).items()}
         self.hift.load_state_dict(hift_state_dict, strict=False)
         self.hift.to(self.device).eval()
 
@@ -154,26 +155,33 @@ class CosyVoiceModel:
             llm_embedding: LLM嵌入向量
             uuid: 当前会话UUID
         """
+        cur_silent_token_num, max_silent_token_num = 0, 5
         with self.llm_context, torch.cuda.amp.autocast(self.fp16 is True and hasattr(self.llm, 'vllm') is False):
             if isinstance(text, Generator):
                 assert (self.__class__.__name__ != 'CosyVoiceModel') and not hasattr(self.llm, 'vllm'), 'streaming input text is only implemented for CosyVoice2/3 and do not support vllm!'
-                for i in self.llm.inference_bistream(text=text,
+                token_generator = self.llm.inference_bistream(text=text,
+                                                              prompt_text=prompt_text.to(self.device),
+                                                              prompt_text_len=torch.tensor([prompt_text.shape[1]], dtype=torch.int32).to(self.device),
+                                                              prompt_speech_token=llm_prompt_speech_token.to(self.device),
+                                                              prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
+                                                              embedding=llm_embedding.to(self.device))
+            else:
+                token_generator = self.llm.inference(text=text.to(self.device),
+                                                     text_len=torch.tensor([text.shape[1]], dtype=torch.int32).to(self.device),
                                                      prompt_text=prompt_text.to(self.device),
                                                      prompt_text_len=torch.tensor([prompt_text.shape[1]], dtype=torch.int32).to(self.device),
                                                      prompt_speech_token=llm_prompt_speech_token.to(self.device),
                                                      prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
-                                                     embedding=llm_embedding.to(self.device)):
-                    self.tts_speech_token_dict[uuid].append(i)
-            else:
-                for i in self.llm.inference(text=text.to(self.device),
-                                            text_len=torch.tensor([text.shape[1]], dtype=torch.int32).to(self.device),
-                                            prompt_text=prompt_text.to(self.device),
-                                            prompt_text_len=torch.tensor([prompt_text.shape[1]], dtype=torch.int32).to(self.device),
-                                            prompt_speech_token=llm_prompt_speech_token.to(self.device),
-                                            prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
-                                            embedding=llm_embedding.to(self.device),
-                                            uuid=uuid):
-                    self.tts_speech_token_dict[uuid].append(i)
+                                                     embedding=llm_embedding.to(self.device),
+                                                     uuid=uuid)  
+            for i in token_generator:
+                if i in self.silent_tokens:
+                    cur_silent_token_num += 1
+                    if cur_silent_token_num > max_silent_token_num:
+                        continue
+                else:
+                    cur_silent_token_num = 0
+                self.tts_speech_token_dict[uuid].append(i)
         self.llm_end_dict[uuid] = True
 
     def vc_job(self, source_speech_token, uuid):
@@ -407,6 +415,7 @@ class CosyVoice2Model(CosyVoiceModel):
         self.tts_speech_token_dict = {}
         self.llm_end_dict = {}
         self.hift_cache_dict = {}
+        self.silent_tokens = []
 
     def load_jit(self, flow_encoder_model):
         """
@@ -596,6 +605,8 @@ class CosyVoice3Model(CosyVoice2Model):
         self.tts_speech_token_dict = {}
         self.llm_end_dict = {}
         self.hift_cache_dict = {}
+        # FSQ silent and breath token
+        self.silent_tokens = [1, 2, 28, 29, 55, 248, 494, 2241, 2242, 2322, 2323]
 
     def token2wav(self, token, prompt_token, prompt_feat, embedding, token_offset, uuid, stream=False, finalize=False, speed=1.0):
         with torch.cuda.amp.autocast(self.fp16):
