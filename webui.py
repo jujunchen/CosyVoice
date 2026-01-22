@@ -103,7 +103,7 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
     # zero_shot mode only use prompt_wav prompt text
     if mode_checkbox_group in ['3s极速复刻']:
         if prompt_text == '':
-            gr.Warning('prompt文本为空，您是否忘记输入prompt文本？')
+            gr.Warning('prompt文本为空，您是否忘记输入prompt文本？提示词前要加You are a helpful assistant.<|endofprompt|>')
             yield (cosyvoice.sample_rate, default_data)
         if instruct_text != '':
             gr.Info('您正在使用3s极速复刻模式，预训练音色/instruct文本会被忽略！')
@@ -123,7 +123,7 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
         set_all_random_seed(seed)
         for i in cosyvoice.inference_cross_lingual(tts_text, prompt_wav, stream=stream, speed=speed):
             yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    else:
+    else: #语言控制，支持预训练音色
         logging.info('get instruct inference request')
         set_all_random_seed(seed)
         if prompt_wav and sft_dropdown:

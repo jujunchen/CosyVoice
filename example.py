@@ -104,7 +104,7 @@ def cosyvoice31_example():
     #                                                     './asset/zero_shot_prompt.wav', stream=False)):
     #     torchaudio.save('zero_shot_{}.wav'.format(i), j['tts_speech'], cosyvoice.sample_rate)
 
-    for i, j in enumerate(cosyvoice.inference_instruct2('张明被坏人抢走了一个包，人也差点儿被打伤。', 'You are a helpful assistant.用诸暨话说<|endofprompt|>',
+    for i, j in enumerate(cosyvoice.inference_instruct2('你饭吃了没', 'You are a helpful assistant.<|endofprompt|>',
                                                         './asset/zero_shot_prompt.wav', stream=False)):
         torchaudio.save('instruct_{}.wav'.format(i), j['tts_speech'], cosyvoice.sample_rate)
 
